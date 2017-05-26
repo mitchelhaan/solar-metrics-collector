@@ -1,0 +1,12 @@
+[Unit]
+Description=Solar Metrics Collector
+Wants=systemd-timesyncd.service
+After=systemd-timesyncd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/solar_collector.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
