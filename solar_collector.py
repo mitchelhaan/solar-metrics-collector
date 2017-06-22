@@ -91,9 +91,10 @@ def status_loop():
         log.debug("Finished collection loop in %f seconds", time.time() - loop_start)
 
         if time.time() > next_upload_time:
-            log.info("Uploading aggregated metrics")
-
-            upload_metrics(metrics.aggregate())
+            # Skip the initial upload, wait until we're on schedule
+            if next_upload_time > 0:
+                log.info("Uploading aggregated metrics")
+                upload_metrics(metrics.aggregate())
             metrics.clear()
 
             delay = upload_interval_sec - time.time() % upload_interval_sec
