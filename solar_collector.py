@@ -29,6 +29,7 @@ night_upload_interval_sec = 10.0 * 60
 # Global variables
 is_daytime = False
 solar_client = EPsolarTracerClient(serialclient=ModbusClient(method='rtu', port='/dev/ttyUSB0', baudrate=115200))
+adc_spidev = SPI.SpiDev(0, 0, 3000000)
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
@@ -182,8 +183,7 @@ def get_avg_battery_current():
     amps_zero = 511  # 10-bit ADC, so 0-1023 full scale
     amps_scale = 0.12  # (5 V / 1024 div) / 40 mV/A
 
-    # ADC is connected to SPI0.0, 3MHz max clock
-    mcp = Adafruit_MCP3008.MCP3008(spi=SPI.SpiDev(0, 0, 3000000))
+    mcp = Adafruit_MCP3008.MCP3008(spi=adc_spidev)
 
     start_time = time.time()
     battery_amps = list()
