@@ -1,5 +1,6 @@
 #!/usr/bin/env python2
 
+import collections
 import datetime
 import json
 import logging
@@ -42,8 +43,9 @@ log.setLevel(logging.INFO)
 class MetricsCollection:
     """Simple class to collect and average metrics"""
 
-    # Metrics which don't get averaged (just use the last entry)
-    _last_entry_only = ['timestamp', 'kwh_today', 'kwh_total', 'pv_charging_mode']
+    # Special cases for certain metrics
+    _most_recent = ['timestamp', 'kwh_today', 'kwh_total']
+    _most_common = ['pv_charging_mode']
 
     def __init__(self):
         self._metrics = dict()
@@ -59,8 +61,10 @@ class MetricsCollection:
     def aggregate(self):
         aggregated_stats = dict()
         for key in self._metrics.keys():
-            if key in self._last_entry_only:
+            if key in self._most_recent:
                 aggregated_stats[key] = self._metrics[key][-1]
+            elif key in self._most_common:
+                aggregated_stats[key] = collections.Counter(self._metrics[key]).most_common()[0][0]
             else:
                 # Round all averages to 2 decimal places to keep things simple
                 aggregated_stats[key] = round(numpy.mean(numpy.array(self._metrics[key])), 2)
