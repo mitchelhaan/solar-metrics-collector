@@ -26,6 +26,9 @@ collection_interval_sec = 5.0
 day_upload_interval_sec = 1.0 * 60
 night_upload_interval_sec = 10.0 * 60
 
+# Measuring load after the inverter, but there are a few things on the DC side too
+pre_inverter_load = 42
+
 # Global variables
 is_daytime = False
 solar_client = EPsolarTracerClient(serialclient=ModbusClient(method='rtu', port='/dev/ttyUSB0', baudrate=115200))
@@ -164,14 +167,17 @@ def get_current_metrics():
 
     current_metrics['battery_temp'] = float(solar_client.read_input("Battery Temp."))
 
-    # Calculate load watts by the difference of solar input and average battery power
-    current_metrics['load_watts'] = current_metrics['pv_watts'] - current_metrics['battery_watts']
+    # Calculate DC load watts by the difference of solar input and average battery power
+    current_metrics['dc_load_watts'] = current_metrics['pv_watts'] - current_metrics['battery_watts']
 
-    # Battery charging independent of solar will make the load appear negative, just call it 0
-    if current_metrics['load_watts'] < 0.0:
-        current_metrics['load_watts'] = 0.0
+    # We're not measuring AC voltage, just assuming 120V RMS and power factor of 1.0
+    current_metrics['ac_load_watts'] = get_ac_rms_current() * 120.0
+
+    current_metrics['load_watts'] = current_metrics['ac_load_watts'] + pre_inverter_load
 
     current_metrics['timestamp'] = datetime.datetime.now()
+
+    log.info('Solar: %.2fW DC Load: %.2fW AC Load: %.2fW', current_metrics['pv_watts'], current_metrics['dc_load_watts'], current_metrics['ac_load_watts'])
 
     return current_metrics
 
@@ -181,7 +187,7 @@ def get_avg_battery_current():
 
     amps_adc = 4
     amps_zero = 511  # 10-bit ADC, so 0-1023 full scale
-    amps_scale = 0.12  # (5 V / 1024 div) / 40 mV/A
+    amps_scale = 0.114  # (5 V / 1024 div) / 43 mV/A
 
     mcp = Adafruit_MCP3008.MCP3008(spi=adc_spidev)
 
@@ -190,9 +196,41 @@ def get_avg_battery_current():
 
     # Collect a decent amount of samples, should be an even division of 120Hz
     while time.time() - start_time < 0.5:
-        battery_amps.append((amps_zero - mcp.read_adc(amps_adc)) * amps_scale)
+        battery_amps.append(mcp.read_adc(amps_adc))
 
-    return numpy.mean(numpy.array(battery_amps))
+    b = (amps_zero - numpy.array(battery_amps)) * amps_scale
+    b_avg = numpy.mean(b)
+
+    if log.isEnabledFor(logging.DEBUG):
+        b_min = numpy.amin(b)
+        b_max = numpy.amax(b)
+        log.debug("Battery Amps: Min %.2f, Avg %.2f, Max %.2f, %d readings", b_min, b_avg, b_max, b.size)
+
+    return b_avg
+
+def get_ac_rms_current():
+    """Get the current measurement from the AC current transducer"""
+
+    amps_adc = 5
+    amps_zero = 0
+    amps_scale = 0.04369  # Determined empirically
+
+    mcp = Adafruit_MCP3008.MCP3008(spi=adc_spidev)
+
+    amps_rms = list()
+    for _ in range(100):
+        amps_rms.append(mcp.read_adc(amps_adc))
+
+    # The current transducer already computes the amps as RMS
+    a = (amps_zero + numpy.array(amps_rms)) * amps_scale
+    a_avg = numpy.mean(a)
+
+    if log.isEnabledFor(logging.DEBUG):
+        a_min = numpy.amin(a)
+        a_max = numpy.amax(a)
+        log.debug("AC Amps RMS: Min %.2f, Avg %.2f, Max %.2f, %d readings", a_min, a_avg, a_max, a.size)
+
+    return a_avg
 
 
 def upload_metrics(metrics):
