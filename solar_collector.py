@@ -36,7 +36,7 @@ adc_spidev = SPI.SpiDev(0, 0, 3000000)
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.INFO)
 
 
 class MetricsCollection:
