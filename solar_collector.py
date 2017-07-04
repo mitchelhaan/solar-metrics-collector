@@ -56,7 +56,7 @@ class MetricsCollection:
                 aggregated_stats[key] = collections.Counter(self._metrics[key]).most_common()[0][0]
             else:
                 # Round all averages to 2 decimal places to keep things simple
-                aggregated_stats[key] = round(numpy.mean(numpy.array(self._metrics[key])), 2)
+                aggregated_stats[key] = numpy.mean(numpy.array(self._metrics[key])).round(2)
         return aggregated_stats
 
     def clear(self):
