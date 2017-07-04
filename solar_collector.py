@@ -9,8 +9,7 @@ import requests
 import time
 
 # ADC support
-import Adafruit_GPIO.SPI as SPI
-import Adafruit_MCP3008
+import Adafruit_ADS1x15
 
 # EPSolar Tracer support
 from pyepsolartracer.client import EPsolarTracerClient
@@ -27,14 +26,7 @@ collection_interval_sec = 5.0
 day_upload_interval_sec = 1.0 * 60
 night_upload_interval_sec = 10.0 * 60
 
-# Global variables
-is_daytime = False
-solar_client = EPsolarTracerClient(serialclient=ModbusClient(method='rtu', port='/dev/ttyUSB0', baudrate=115200))
-adc_spidev = SPI.SpiDev(0, 0, 3000000)
 
-logging.basicConfig()
-log = logging.getLogger(__name__)
-log.setLevel(logging.INFO)
 
 
 class MetricsCollection:
@@ -104,6 +96,29 @@ def status_loop():
         log.debug("Next collection scheduled in %f seconds", delay)
         log.debug("Next upload scheduled in %f seconds", next_upload_time - time.time())
         time.sleep(delay)
+
+
+def read_adc(channel, duration):
+    """Read values from ADC channel"""
+    adc_gain = 1  # Valid gains: 2/3, 1, 2, 4, 8, 16
+    adc_rate = 860  # Valid rates: 8, 16, 32, 64, 128, 250, 475, 860 samples per second
+
+    measurements = list()
+
+    # Read in continuous mode
+    adc.start_adc(channel, adc_gain, adc_rate)
+    start_time = time.time()
+
+    while time.time() - start_time < duration:
+        try:
+            measurements.append(adc.get_last_result())
+        except IOError:
+            continue
+        time.sleep(1.0/adc_rate)
+
+    adc.stop_adc()
+
+    return numpy.interp(numpy.array(measurements), [0.0, 32767.0], [0.0, 4.096 / adc_gain])
 
 
 def update_daytime_state():
@@ -188,19 +203,13 @@ def get_current_metrics():
 def get_battery_current():
     """Get the current from the battery bank current transducer"""
 
-    adc_channel = 4
-    adc_zero = 512.06  # 10-bit ADC, so 0-1023 full scale
-    adc_scale = 0.1144  # Roughly (5 V / 1024 div) / 43 mV/A
-
-    mcp = Adafruit_MCP3008.MCP3008(spi=adc_spidev)
-
-    start_time = time.time()
-    measurements = list()
+    adc_channel = 0
+    adc_zero = 2.56  # Full-scale of the transducer (5.12 V), divided in half
+    adc_scale = 1.0/0.043  # Amps/Volt
 
     # Calculate the average amps, because the current is 120Hz pulsed from DC->AC conversion
     # Measurement duration must be an even multiple of 120Hz
-    while time.time() - start_time < 24.0/120.0:
-        measurements.append(mcp.read_adc(adc_channel))
+    measurements = read_adc(adc_channel, 24.0/120.0)
 
     a = (adc_zero - numpy.array(measurements)) * adc_scale
     a_avg = numpy.mean(a)
@@ -216,18 +225,12 @@ def get_battery_current():
 def get_dc_load_current():
     """Get the current measurement from the DC current transducer"""
 
-    adc_channel = 0
-    adc_zero = 510.1  # 10-bit ADC, so 0-1023 full scale
-    adc_scale = -0.1144  # Roughly (5 V / 1024 div) / 43 mV/A, inverted to make "load" value positive
-
-    mcp = Adafruit_MCP3008.MCP3008(spi=adc_spidev)
-
-    measurements = list()
-    start_time = time.time()
+    adc_channel = 1
+    adc_zero = 2.5505  # Full-scale of the transducer (5.12 V), divided in half
+    adc_scale = -1.0/0.040  # Amps/Volt, inverted to make load positive
 
     # DC load is fairly consistent, just get a short average
-    while time.time() - start_time < 0.1:
-        measurements.append(mcp.read_adc(adc_channel))
+    measurements = read_adc(adc_channel, 0.1)
 
     a = (adc_zero - numpy.array(measurements)) * adc_scale
     a_avg = numpy.mean(a)
@@ -243,17 +246,11 @@ def get_dc_load_current():
 def get_ac_load_power():
     """Get the power measurement from the AC power transducer"""
 
-    adc_channel = 5
-    adc_scale = 2.83  # Roughly 3000 watts / 1024 div
+    adc_channel = 2
+    adc_scale = 600  # Watts/Volt
     power_offset = 30  # The inverter itself uses a bit of power
 
-    mcp = Adafruit_MCP3008.MCP3008(spi=adc_spidev)
-
-    measurements = list()
-    start_time = time.time()
-
-    while time.time() - start_time < 0.2:
-        measurements.append(mcp.read_adc(adc_channel))
+    measurements = read_adc(adc_channel, 0.2)
 
     a = power_offset + numpy.array(measurements) * adc_scale
     a_avg = numpy.mean(a)
@@ -297,6 +294,14 @@ def upload_metrics(metrics):
             f.write('\n')
         log.error("Failed to upload entry (%s)", str(e))
 
+# Global variables
+is_daytime = False
+solar_client = EPsolarTracerClient(serialclient=ModbusClient(method='rtu', port='/dev/ttyUSB0', baudrate=115200))
+adc = Adafruit_ADS1x15.ADS1115()
+
+logging.basicConfig()
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
 if __name__ == "__main__":
     status_loop()
