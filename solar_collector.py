@@ -20,6 +20,7 @@ from pymodbus.client.sync import ModbusSerialClient as ModbusClient
 api_endpoint = 'https://example.com/api/solar/upload'
 api_auth = ('username', 'password')
 failed_upload_file = "/opt/solar_upload_failed.json"
+battery_state_file = "/var/run/battery.state"
 
 # Collect every 5 seconds, aggregate and upload once per minute during the day, once per 10 mins at night
 collection_interval_sec = 5.0
@@ -27,13 +28,100 @@ day_upload_interval_sec = 1.0 * 60
 night_upload_interval_sec = 10.0 * 60
 
 
+class StateManager:
+    def __init__(self, state_file, defaults=None):
+        self._defaults = defaults if defaults is not None else dict()
+        try:
+            self._state_fp = open(state_file, mode='r+', buffering=0)
+        except IOError:
+            self._state_fp = open(state_file, mode='w+', buffering=0)
+
+    def __enter__(self):
+        try:
+            self._state_fp.seek(0)
+            self._state_dict = self._defaults.copy()
+            self._state_dict.update(json.load(self._state_fp))
+        except ValueError:
+            pass
+
+        return self._state_dict
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._state_fp.seek(0)
+        self._state_fp.truncate()
+        json.dump(self._state_dict, self._state_fp)
+        self._state_fp.close()
+
+
+class SealedLeadAcidBatterySoC:
+    _cell_resting_voltage = 2.1
+    _cell_float_voltage = 2.3
+    _cell_absorption_voltage = 2.4
+    _cell_equalization_voltage = 2.433333
+
+    _defaults = dict()
+    _defaults['remaining_capacity_ah'] = 0.0
+    _defaults['charging_correction_factor'] = 1.0
+    _defaults['discharging_correction_factor'] = 1.0
+
+    def __init__(self, capacity_ah, cell_count=6):
+        self.average_current = 0.0
+        self.total_capacity_ah = capacity_ah
+        self.cell_count = cell_count
+
+    def set_percent_charged(self, percent_charged):
+        self.set_remaining_capacity(self.total_capacity_ah * (percent_charged / 100.0))
+
+    def get_percent_charged(self):
+        with StateManager(battery_state_file, self._defaults) as b_state:
+            charged = b_state['remaining_capacity_ah'] / self.total_capacity_ah * 100.0
+            return clamp_value(charged, 0.0, 100.0)
+
+    def set_remaining_capacity(self, capacity):
+        with StateManager(battery_state_file, self._defaults) as b_state:
+            old_ah = b_state['remaining_capacity_ah']
+            new_ah = clamp_value(capacity, 0.0, self.total_capacity_ah)
+            b_state['remaining_capacity_ah'] = new_ah
+            log.info("Updated battery charge state: Was %.2f Ah, now %.2f Ah", old_ah, new_ah)
+
+    def get_remaining_capacity(self):
+        with StateManager(battery_state_file, self._defaults) as b_state:
+            return clamp_value(b_state['remaining_capacity_ah'], 0.0, self.total_capacity_ah)
+
+    def estimate_capacity_from_voltage(self, voltage, current=0.0, float_charging=False, temperature=20.0):
+        """Estimating capacity under load/charging is quite difficult, so for now only do it while floating"""
+        c_rate = current / self.total_capacity_ah
+        cell_voltage = voltage / float(self.cell_count)
+
+        # Floating, charge rate is < 0.01C
+        if float_charging and 0.0 <= c_rate <= 0.01 and abs(cell_voltage - self._cell_float_voltage) <= 0.1:
+            return self.total_capacity_ah
+
+        # Floating, charge rate is 0.01C - 0.1C
+        if float_charging and 0.01 < c_rate <= 0.1 and abs(cell_voltage - self._cell_float_voltage) <= 0.1:
+            percent_est = 1.0 + 0.2 * (0.01 - c_rate)
+            return self.total_capacity_ah * percent_est
+
+        return 0.0
+
+    def update(self, amp_hours, temperature=20.0):
+        with StateManager(battery_state_file, self._defaults) as b_state:
+            if amp_hours > 0:
+                amp_hours *= b_state['charging_correction_factor']
+            else:
+                amp_hours *= b_state['discharging_correction_factor']
+
+            new_remaining_capacity = b_state['remaining_capacity_ah'] + amp_hours
+            b_state['remaining_capacity_ah'] = clamp_value(new_remaining_capacity, 0.0, self.total_capacity_ah)
+
+            log.debug("Battery SoC: %.3f (%.3f) Ah, %s", new_remaining_capacity, amp_hours, json.dumps(b_state))
 
 
 class MetricsCollection:
     """Simple class to collect and average metrics"""
 
     # Special cases for certain metrics
-    _most_recent = ['timestamp', 'kwh_today', 'kwh_total']
+    _most_recent = ['timestamp', 'kwh_today', 'kwh_total', 'battery_charge']
     _most_common = ['pv_charging_mode']
 
     def __init__(self):
@@ -96,6 +184,11 @@ def status_loop():
         log.debug("Next collection scheduled in %f seconds", delay)
         log.debug("Next upload scheduled in %f seconds", next_upload_time - time.time())
         time.sleep(delay)
+
+
+def clamp_value(val, min_val, max_val):
+    """Restrict a value to within the specified range"""
+    return min_val if val < min_val else max_val if val > max_val else val
 
 
 def read_adc(channel, duration):
@@ -183,6 +276,16 @@ def get_current_metrics():
     current_metrics['battery_amps'] = get_battery_current()
     current_metrics['battery_watts'] = current_metrics['battery_volts'] * current_metrics['battery_amps']
 
+    # Only force the charge state if we've gotten significantly off track
+    if current_metrics['pv_charging_mode'] == 'Float' and battery_monitor.get_percent_charged() < 98.0:
+        est = battery_monitor.estimate_capacity_from_voltage(current_metrics['battery_volts'],
+                                                             current_metrics['battery_amps'], float_charging=True)
+        battery_monitor.set_remaining_capacity(est)
+
+    ah_this_interval = current_metrics['battery_amps'] * (collection_interval_sec / 3600.0)
+    battery_monitor.update(amp_hours=ah_this_interval)
+    current_metrics['battery_charge'] = round(battery_monitor.get_percent_charged(), 2)
+
     current_metrics['dc_load_watts'] = current_metrics['battery_volts'] * get_dc_load_current()
 
     current_metrics['ac_load_watts'] = get_ac_load_power()
@@ -190,6 +293,11 @@ def get_current_metrics():
     current_metrics['load_watts'] = current_metrics['ac_load_watts'] + current_metrics['dc_load_watts']
 
     current_metrics['timestamp'] = datetime.datetime.now()
+
+    log.info('Estimated battery SoC: %.3f Ah (%.3f%%) %.2f V',
+             battery_monitor.get_remaining_capacity(),
+             battery_monitor.get_percent_charged(),
+             current_metrics['battery_volts'])
 
     log.info('Solar: %.2fW Battery: %.2fW DC Load: %.2fW AC Load: %.2fW',
              current_metrics['pv_watts'],
@@ -297,6 +405,7 @@ def upload_metrics(metrics):
 # Global variables
 is_daytime = False
 solar_client = EPsolarTracerClient(serialclient=ModbusClient(method='rtu', port='/dev/ttyUSB0', baudrate=115200))
+battery_monitor = SealedLeadAcidBatterySoC(capacity_ah=125.0, cell_count=24)
 adc = Adafruit_ADS1x15.ADS1115()
 
 logging.basicConfig()
