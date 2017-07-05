@@ -23,6 +23,7 @@ api_endpoint = 'https://example.com/api/solar/upload'
 api_auth = ('username', 'password')
 failed_upload_file = "/opt/solar_upload_failed.json"
 battery_state_file = "/var/run/battery.state"
+rtc_base_register = 0x9013
 
 # Collect every 5 seconds, aggregate and upload once per minute during the day, once per 10 mins at night
 collection_interval_sec = 5.0
@@ -210,6 +211,11 @@ def status_loop():
         update_daytime_state()
         upload_interval_sec = day_upload_interval_sec if is_daytime else night_upload_interval_sec
 
+        # Update the RTC every day at midnight
+        t = datetime.datetime.now()
+        if t.hour == t.minute == t.second == 0:
+            update_controller_rtc()
+
         metrics.add(get_current_metrics())
 
         log.debug("Finished collection loop in %f seconds", time.time() - loop_start)
@@ -283,6 +289,17 @@ def update_daytime_state():
             is_daytime = False
         if current_voltage >= day_voltage:
             is_daytime = True
+
+
+def update_controller_rtc():
+    t = datetime.datetime.now()
+
+    t_values = list()
+    t_values.append(t.minute << 8 | t.second)
+    t_values.append(t.day << 8 | t.hour)
+    t_values.append((t.year - 2000) << 8 | t.month)
+
+    solar_client.client.write_registers(rtc_base_register, t_values, unit=1)
 
 
 def get_current_metrics():
