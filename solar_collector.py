@@ -5,8 +5,10 @@ import datetime
 import json
 import logging
 import numpy
+import Queue
 import requests
 import time
+import threading
 
 # ADC support
 import Adafruit_ADS1x15
@@ -151,12 +153,54 @@ class MetricsCollection:
         self._metrics.clear()
 
 
+class MetricUploader:
+    def __init__(self):
+        self._queue = Queue.Queue()
+        self._thread = threading.Thread(target=self._run, args=())
+        self._thread.daemon = True
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            metric_collection = self._queue.get(block=True)
+
+            # Reformat the timestamp value for MySQL
+            metric_collection['timestamp'] = metric_collection['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+
+            json_data = json.dumps({'data': [metric_collection]})
+            log.debug(json_data)
+
+            try:
+                response = requests.post(api_endpoint, auth=api_auth, data=json_data, timeout=30)
+                log.info("Upload response for %s: %s", metric_collection['timestamp'], response.text)
+                response.raise_for_status()
+                if 'error' in response.json():
+                    raise Exception(response.json()['error'])
+            except Exception as e:
+                # If the upload failed, save the data for retrying later
+                with open(failed_upload_file, 'a') as f:
+                    f.write(json_data)
+                    f.write('\n')
+                log.error("Failed to upload entry (%s)", str(e))
+
+            self._queue.task_done()
+
+    def enqueue(self, metric_collection):
+        if type(metric_collection) is list:
+            for m in metric_collection:
+                self._queue.put(m)
+        else:
+            self._queue.put(metric_collection)
+
+
 def status_loop():
     """Main loop, runs continuously gathering metrics"""
 
     solar_client.connect()
 
     metrics = MetricsCollection()
+    metric_uploader = MetricUploader()
+
     next_upload_time = 0
 
     while True:
@@ -174,7 +218,7 @@ def status_loop():
             # Skip the initial upload, wait until we're on schedule
             if next_upload_time > 0:
                 log.info("Uploading aggregated metrics")
-                upload_metrics(metrics.aggregate())
+                metric_uploader.enqueue(metrics.aggregate())
             metrics.clear()
 
             delay = upload_interval_sec - time.time() % upload_interval_sec
@@ -370,37 +414,6 @@ def get_ac_load_power():
 
     return a_avg
 
-
-def upload_metrics(metrics):
-    """Send a collection of metrics to the upload API"""
-
-    metrics_collection = list()
-
-    # Generally we're only uploading a single collection of metrics, but leave the option for multiple
-    if type(metrics) is list:
-        metrics_collection.extend(metrics)
-    else:
-        metrics_collection.append(metrics)
-
-    # Convert the timestamps to SQL datetime format
-    for m in metrics_collection:
-        m['timestamp'] = m['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-
-    json_data = json.dumps({'data': metrics_collection})
-    log.debug(json_data)
-
-    try:
-        response = requests.post(api_endpoint, auth=api_auth, data=json_data, timeout=30)
-        log.info("Upload response: %s", response.text)
-        response.raise_for_status()
-        if 'error' in response.json():
-            raise Exception(response.json()['error'])
-    except Exception as e:
-        # If the upload failed, save the data for retrying later
-        with open(failed_upload_file, 'a') as f:
-            f.write(json_data)
-            f.write('\n')
-        log.error("Failed to upload entry (%s)", str(e))
 
 # Global variables
 is_daytime = False
