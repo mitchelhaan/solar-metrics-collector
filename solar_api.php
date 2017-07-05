@@ -5,7 +5,7 @@ const MYSQL_USER = 'username';
 const MYSQL_PASS = 'password';
 const MYSQL_DB = 'solar';
 
-const STATS_FIELDS = 'timestamp, pv_volts, pv_amps, pv_watts, load_watts, kwh_today, kwh_total, pv_charging_mode, battery_volts, battery_amps, battery_watts, battery_temp';
+const STATS_FIELDS = 'timestamp, pv_volts, pv_amps, pv_watts, load_watts, kwh_today, kwh_total, pv_charging_mode, battery_volts, battery_amps, battery_watts, battery_charge, battery_temp';
 
 const AUTH_USER = 'solar';
 
@@ -91,12 +91,12 @@ function insert_solar_log_entries($location, $request)
 		return_error('503 Service Unavailable', 'Failed to connect to database');
 	}
 
-	$stmt = $conn->prepare("INSERT INTO stats_log_{$location} (timestamp, pv_volts, pv_amps, pv_watts, kwh_today, kwh_total, pv_charging_mode, battery_volts, battery_amps, battery_watts, load_watts, battery_temp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+	$stmt = $conn->prepare("INSERT INTO stats_log_{$location} (timestamp, pv_volts, pv_amps, pv_watts, kwh_today, kwh_total, pv_charging_mode, battery_volts, battery_amps, battery_watts, load_watts, battery_charge, battery_temp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 	if ($stmt === FALSE)
 	{
 		return_error('503 Service Unavailable', 'Failed to connect to database');
 	}
-	$stmt->bind_param("sdddddsddddd", $timestamp, $pv_volts, $pv_amps, $pv_watts, $kwh_today, $kwh_total, $pv_charging_mode, $battery_volts, $battery_amps, $battery_watts, $load_watts, $battery_temp);
+	$stmt->bind_param("sdddddsdddddd", $timestamp, $pv_volts, $pv_amps, $pv_watts, $kwh_today, $kwh_total, $pv_charging_mode, $battery_volts, $battery_amps, $battery_watts, $load_watts, $battery_charge, $battery_temp);
 
 	$inserted_count = 0;
 
@@ -113,6 +113,7 @@ function insert_solar_log_entries($location, $request)
 		$battery_amps = $log_entry->battery_amps;
 		$load_watts = $log_entry->load_watts;
 		$battery_watts = $log_entry->battery_watts;
+		$battery_charge = $log_entry->battery_charge;
 		$battery_temp = $log_entry->battery_temp;
 
 		if ($stmt->execute())

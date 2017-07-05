@@ -12,6 +12,7 @@ CREATE TABLE `stats_log_home` (
   `battery_volts` float NOT NULL,
   `battery_amps` float NOT NULL,
   `battery_watts` float NOT NULL,
+  `battery_charge` float NOT NULL,
   `battery_temp` float NOT NULL,
   `load_watts` float NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
